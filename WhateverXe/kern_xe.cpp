@@ -18626,15 +18626,14 @@ uint32_t XE::wrapTGLModeInfo(void *fb, int mode, void *info) {
 // mode missing from the display list (4K60 YCbCr 4:2:0 over a 300 MHz HDMI port) can be traced to
 // its rejection. Keeps the latest 48 calls: {seq, fb, pixel clock kHz, h active, v active,
 // h blanking, v blanking, encoding | bpc << 16, result}. The timing is IODetailedTimingInformationV2.
-// With wexhdmimaxclk=<kHz>, an HDMI sink's timing whose TMDS clock exceeds the board's HDMI limit is
-// rejected here. The sink's EDID can then advertise its own higher TMDS limit, so 4K60 is listed and
-// only YCbCr 4:2:0 (half the TMDS clock) passes on a board wired for HDMI 1.4 (297 MHz).
+// With -wex-hdmi-300mhz, an HDMI sink's timing whose TMDS clock exceeds 300 MHz is rejected here, for
+// boards wired for HDMI 1.4 (297 MHz). The sink's EDID can then advertise its own higher TMDS limit, so
+// 4K60 is listed and only YCbCr 4:2:0 (half the TMDS clock) passes. A flag, since XNU parses a
+// dash-prefixed boot argument as a boolean and ignores its value.
 uint32_t XE::wrapTGLValidateTiming(void *fb, void *timing, uint64_t size) {
 	// Offsets as Sequoia's validateDetailedTiming reads them: pixel clock +0x54, h active/blanking
 	// +0x6C/+0x70, v active/blanking +0x7C/+0x80, pixel encoding +0xB4, bits per component +0xB6.
-	static uint32_t hdmiMaxClock = UINT32_MAX;
-	if (hdmiMaxClock == UINT32_MAX && !PE_parse_boot_argn("wexhdmimaxclk", &hdmiMaxClock, sizeof(hdmiMaxClock)))
-		hdmiMaxClock = 0;
+	static const uint32_t hdmiMaxClock = checkKernelArgument("-wex-hdmi-300mhz") ? 300000 : 0;
 	uint32_t result = kIOReturnUnsupportedMode;
 	auto t = static_cast<const uint8_t *>(timing);
 	// +0x4289: getOnlineInfo's HDMI sink flag (TMDS port whose EDID carries an HDMI VSDB).
