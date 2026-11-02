@@ -348,7 +348,11 @@ private:
 	mach_vm_address_t orgTGLScanoutAllocate {}, orgTGLScanoutSetup {}, orgTGLPlaneUpdate {}, orgTGLAperture {};
 	mach_vm_address_t orgTGLPlaneSetup {}, orgTGLColorMode {}, orgTGLPixelInfo {}, orgTGLModeInfo {};
 	mach_vm_address_t orgTGLValidateTiming {}, orgTGLTimingRange {};
+	mach_vm_address_t orgTGLHwSetMode {}, orgTGLPllDivisors {}, orgTGLFillAVI {};
 	uint32_t tglHDMIMaxClock {};
+	// Per framebuffer: the display path set in native HDMI YCbCr 4:2:0, and its CTA VIC.
+	void *tgl420Path[3] {};
+	uint8_t tgl420VIC[3] {};
 	mach_vm_address_t orgTGLModeTiming {};
 	bool tglPanelDepthReady {false};
  bool display13PanelPWMReady {},display13PanelPowerReady {},display13PanelProbeReady {};
@@ -407,6 +411,9 @@ private:
 	static uint32_t wrapTGLModeInfo(void *fb, int mode, void *info);
 	static uint32_t wrapTGLValidateTiming(void *fb, void *timing, uint64_t size);
 	static void wrapTGLTimingRange(void *fb, uint64_t minClock, uint64_t maxClock);
+	static uint32_t wrapTGLHwSetMode(void *controller, void *fb, void *path, const void *timing);
+	static uint64_t wrapTGLPllDivisors(void *controller, uint32_t clock, void *path);
+	static void wrapTGLFillAVI(void *controller, void *fb, uint8_t *frame);
 	static bool wrapTGLScanoutAllocate(void *fb);
 	static void wrapTGLScanoutSetup(void *fb);
 	static void wrapTGLPlaneUpdate(void *plane, bool flag);

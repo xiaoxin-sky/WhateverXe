@@ -12113,8 +12113,13 @@ bool XE::processKextFull(KernelPatcher &patcher, size_t index, mach_vm_address_t
 				patcher.clearError();
 			}
 			if (tglHDMIMaxClock) {
-				KernelPatcher::RouteRequest route("__ZN21AppleIntelFramebuffer17updateTimingRangeEyy", wrapTGLTimingRange, orgTGLTimingRange);
-				IORegistryEntry::getRegistryRoot()->setProperty("TGLRouteTimingRange", patcher.routeMultiple(index, &route, 1, address, size));
+				KernelPatcher::RouteRequest routes[] {
+					{"__ZN21AppleIntelFramebuffer17updateTimingRangeEyy", wrapTGLTimingRange, orgTGLTimingRange},
+					{"__ZN31AppleIntelFramebufferController9hwSetModeEP21AppleIntelFramebufferP21AppleIntelDisplayPathPK29IODetailedTimingInformationV2", wrapTGLHwSetMode, orgTGLHwSetMode},
+					{"__ZN31AppleIntelFramebufferController20calculatePllDivisorsEjP21AppleIntelDisplayPath", wrapTGLPllDivisors, orgTGLPllDivisors},
+					{"__ZN31AppleIntelFramebufferController10fillAVIDIPEP21AppleIntelFramebufferPh", wrapTGLFillAVI, orgTGLFillAVI},
+				};
+				IORegistryEntry::getRegistryRoot()->setProperty("TGLRouteTimingRange", patcher.routeMultiple(index, routes, arrsize(routes), address, size));
 				patcher.clearError();
 			}
 			{
@@ -18636,6 +18641,27 @@ uint32_t XE::wrapTGLModeInfo(void *fb, int mode, void *info) {
 // boards wired for HDMI 1.4 (297 MHz). The sink's EDID can then advertise its own higher TMDS limit, so
 // 4K60 is listed and only YCbCr 4:2:0 (half the TMDS clock) passes. A flag, since XNU parses a
 // dash-prefixed boot argument as a boolean and ignores its value.
+//
+// TMDS clock (kHz) of an HDMI timing. WindowServer only asks RGB/4:4:4 and never retries 4:2:0 itself,
+// so when only YCbCr 4:2:0 8 bpc fits under the limit, switch the encoding to it, as Windows chooses on
+// a board wired for HDMI 1.4 at 4K60. IOGraphics values: encoding RGB 0x1, 4:4:4 0x2, 4:2:2 0x4 (no
+// deep colour TMDS overhead), 4:2:0 0x8; bits per component 10 0x4, 12 0x8, 16 0x10, otherwise 8.
+static uint64_t tglHDMIFit(uint32_t limit, uint64_t clock, uint16_t &encoding, uint16_t &bpc) {
+	uint64_t tmds = encoding == 0x4 ? clock : clock * (bpc == 0x10 ? 16 : bpc == 0x8 ? 12 : bpc == 0x4 ? 10 : 8) / 8;
+	if (encoding == 0x8) tmds /= 2;
+	if (tmds > limit && (encoding == 0x1 || encoding == 0x2) && clock / 2 <= limit) {
+		encoding = 0x8;
+		bpc = 0x2;
+		tmds = clock / 2;
+	}
+	return tmds;
+}
+// The framebuffer's port, through its display pipe as validateDetailedTiming reaches it.
+static uint8_t *tglFramebufferPort(void *fb) {
+	auto b = static_cast<uint8_t *>(fb);
+	auto path = *reinterpret_cast<uint8_t **>(b + (*reinterpret_cast<int32_t *>(b + 0x3FD8) == -1 ? 0x49F0 : 0x4A08));
+	return path ? *reinterpret_cast<uint8_t **>(path + 0x3648) : nullptr;
+}
 uint32_t XE::wrapTGLValidateTiming(void *fb, void *timing, uint64_t size) {
 	// Offsets as Sequoia's validateDetailedTiming reads them: pixel clock +0x54, h active/blanking
 	// +0x6C/+0x70, v active/blanking +0x7C/+0x80, pixel encoding +0xB4, bits per component +0xB6.
@@ -18644,13 +18670,15 @@ uint32_t XE::wrapTGLValidateTiming(void *fb, void *timing, uint64_t size) {
 	auto t = static_cast<const uint8_t *>(timing);
 	// +0x4289: getOnlineInfo's HDMI sink flag (TMDS port whose EDID carries an HDMI VSDB).
 	if (hdmiMaxClock && fb && timing && size >= 0xB8 && static_cast<uint8_t *>(fb)[0x4289]) {
-		const uint64_t clock = *reinterpret_cast<const uint64_t *>(t + 0x54) / 1000;
-		const auto encoding = *reinterpret_cast<const uint16_t *>(t + 0xB4);
-		const auto bpc = *reinterpret_cast<const uint16_t *>(t + 0xB6);
-		// IOGraphics bit values: 10 bpc 0x4, 12 bpc 0x8, 16 bpc 0x10; YCbCr 4:2:2 0x4 (no deep colour
-		// TMDS overhead), 4:2:0 0x8. 8 bpc or unknown counts as 8.
-		uint64_t tmds = encoding == 0x4 ? clock : clock * (bpc == 0x10 ? 16 : bpc == 0x8 ? 12 : bpc == 0x4 ? 10 : 8) / 8;
-		if (encoding == 0x8) tmds /= 2;
+		// The timing is in/out: a 4:2:0 switch is handed back with the result.
+		auto w = static_cast<uint8_t *>(timing);
+		auto &encoding = *reinterpret_cast<uint16_t *>(w + 0xB4);
+		auto &bpc = *reinterpret_cast<uint16_t *>(w + 0xB6);
+		const auto tmds = tglHDMIFit(hdmiMaxClock, *reinterpret_cast<const uint64_t *>(t + 0x54) / 1000, encoding, bpc);
+		// Native 4:2:0 also needs the port's 4:2:0 pass-through flag (+0x101), which only getDPCDInfo sets
+		// from a DP-to-HDMI converter. Here the pipe itself outputs 4:2:0 (PIPE_MISC, scaler, AVI Y=3).
+		if (encoding == 0x8)
+			if (auto port = tglFramebufferPort(fb)) port[0x101] = 1;
 		if (tmds <= hdmiMaxClock) result = FunctionCast(wrapTGLValidateTiming, callbackXE->orgTGLValidateTiming)(fb, timing, size);
 	} else {
 		result = FunctionCast(wrapTGLValidateTiming, callbackXE->orgTGLValidateTiming)(fb, timing, size);
@@ -18686,6 +18714,70 @@ void XE::wrapTGLTimingRange(void *fb, uint64_t minClock, uint64_t maxClock) {
 		IORegistryEntry::getRegistryRoot()->setProperty("TGLHDMITimingRange", r, sizeof(r));
 	}
 	FunctionCast(wrapTGLTimingRange, callbackXE->orgTGLTimingRange)(fb, minClock, maxClock);
+}
+// Native HDMI YCbCr 4:2:0. hwSetMode copies the timing and hands it to SetupParams (PIPE_MISC 4:2:0
+// enable and full blend for encoding 0x8 with GPU420Support), setupPipeScaler (chroma downsampling),
+// setColorMode (RGB to YCbCr CSC) and setupClocks. When only 4:2:0 fits the HDMI limit, set the mode
+// with a 4:2:0 copy and remember the pipe, so the PLL runs at half the pixel clock and the AVI
+// InfoFrame says 4:2:0. V2 offsets: pixel clock +0x28, h/v active +0x40/+0x50, encoding +0x88, bpc +0x8A.
+uint32_t XE::wrapTGLHwSetMode(void *controller, void *fb, void *path, const void *timing) {
+	auto self = callbackXE;
+	const auto index = fb ? *reinterpret_cast<uint32_t *>(static_cast<uint8_t *>(fb) + 0x1DC) : 3;
+	if (index < 3 && path && timing && static_cast<uint8_t *>(fb)[0x4289]) {
+		uint8_t copy[0xA0];
+		memcpy(copy, timing, sizeof(copy));
+		const auto clock = *reinterpret_cast<const uint64_t *>(copy + 0x28);
+		auto &encoding = *reinterpret_cast<uint16_t *>(copy + 0x88);
+		auto &bpc = *reinterpret_cast<uint16_t *>(copy + 0x8A);
+		const auto requested = encoding;
+		tglHDMIFit(self->tglHDMIMaxClock, clock / 1000, encoding, bpc);
+		const auto h = *reinterpret_cast<const uint32_t *>(copy + 0x40), v = *reinterpret_cast<const uint32_t *>(copy + 0x50);
+		self->tgl420Path[index] = encoding == 0x8 ? path : nullptr;
+		// CTA-861 VIC 97 (3840x2160@60) and 102 (4096x2160@60), both 594 MHz.
+		self->tgl420VIC[index] = encoding != 0x8 || clock != 594000000 || v != 2160 ? 0 : h == 3840 ? 97 : h == 4096 ? 102 : 0;
+		uint32_t r[] {index, requested, encoding, static_cast<uint32_t>(clock / 1000), h, v, self->tgl420VIC[index]};
+		IORegistryEntry::getRegistryRoot()->setProperty("TGLHDMI420Mode", r, sizeof(r));
+		if (encoding == 0x8) {
+			if (auto port = tglFramebufferPort(fb)) port[0x101] = 1;
+			return FunctionCast(wrapTGLHwSetMode, self->orgTGLHwSetMode)(controller, fb, path, copy);
+		}
+	} else if (index < 3) {
+		self->tgl420Path[index] = nullptr;
+	}
+	return FunctionCast(wrapTGLHwSetMode, self->orgTGLHwSetMode)(controller, fb, path, timing);
+}
+// setupClocks passes an HDMI path's pixel clock straight to calculatePllDivisors. A 4:2:0 pipe sends
+// two pixels per TMDS character, so the port clock is half (4K60: 297 MHz, the 4K30 RGB PLL).
+uint64_t XE::wrapTGLPllDivisors(void *controller, uint32_t clock, void *path) {
+	auto self = callbackXE;
+	for (uint32_t i = 0; path && i < 3; ++i) {
+		if (self->tgl420Path[i] == path) {
+			uint32_t r[] {i, clock / 1000, clock / 2000};
+			IORegistryEntry::getRegistryRoot()->setProperty("TGLHDMI420PLL", r, sizeof(r));
+			clock /= 2;
+			break;
+		}
+	}
+	return FunctionCast(wrapTGLPllDivisors, self->orgTGLPllDivisors)(controller, clock, path);
+}
+// fillAVIDIP writes Y=2 (YCbCr 4:4:4) for every non-RGB mode. The frame is the 3-byte header, checksum
+// and 13 payload bytes: PB1 (Y1:Y0 in bits 6:5) at [4], VIC at [7]. Mark 4:2:0, the CTA VIC of the
+// 4:2:0 timing, and redo the checksum over all 17 bytes.
+void XE::wrapTGLFillAVI(void *controller, void *fb, uint8_t *frame) {
+	auto self = callbackXE;
+	FunctionCast(wrapTGLFillAVI, self->orgTGLFillAVI)(controller, fb, frame);
+	const auto index = fb ? *reinterpret_cast<uint32_t *>(static_cast<uint8_t *>(fb) + 0x1DC) : 3;
+	if (!frame || index >= 3 || !self->tgl420Path[index])
+		return;
+	frame[4] = static_cast<uint8_t>((frame[4] & ~0x60) | 0x60);
+	if (self->tgl420VIC[index])
+		frame[7] = self->tgl420VIC[index];
+	frame[3] = 0;
+	uint8_t sum = 0;
+	for (uint32_t i = 0; i < 17; ++i)
+		sum += frame[i];
+	frame[3] = static_cast<uint8_t>(-sum);
+	IORegistryEntry::getRegistryRoot()->setProperty("TGLHDMI420AVI", frame, 17);
 }
 IOMemoryDescriptor *XE::wrapTGLAperture(void *fb, int aperture) {
 	auto r = FunctionCast(wrapTGLAperture, callbackXE->orgTGLAperture)(fb, aperture);
