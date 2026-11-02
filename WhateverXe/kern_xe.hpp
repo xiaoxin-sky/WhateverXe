@@ -346,7 +346,7 @@ private:
 	static void wrapTGLEngineDisable(void *power);
 	static void tglObserveEngine(void *power, uint32_t event, bool done, void *caller);
 	mach_vm_address_t orgTGLScanoutAllocate {}, orgTGLScanoutSetup {}, orgTGLPlaneUpdate {}, orgTGLAperture {};
-	mach_vm_address_t orgTGLPlaneSetup {}, orgTGLColorMode {}, orgTGLPixelInfo {};
+	mach_vm_address_t orgTGLPlaneSetup {}, orgTGLColorMode {}, orgTGLPixelInfo {}, orgTGLModeInfo {};
 	mach_vm_address_t orgTGLModeTiming {};
 	bool tglPanelDepthReady {false};
  bool display13PanelPWMReady {},display13PanelPowerReady {},display13PanelProbeReady {};
@@ -402,6 +402,7 @@ private:
 	static void wrapTGLPlaneSetup(void *plane, void *path);
 	static void wrapTGLColorMode(void *controller, void *fb, void *path, uint32_t mode, uint32_t depth, bool flag, const void *timing);
 	static uint32_t wrapTGLPixelInfo(void *fb, int mode, int depth, int aperture, void *info);
+	static uint32_t wrapTGLModeInfo(void *fb, int mode, void *info);
 	static bool wrapTGLScanoutAllocate(void *fb);
 	static void wrapTGLScanoutSetup(void *fb);
 	static void wrapTGLPlaneUpdate(void *plane, bool flag);

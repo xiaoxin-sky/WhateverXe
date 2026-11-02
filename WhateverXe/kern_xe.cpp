@@ -12093,6 +12093,11 @@ bool XE::processKextFull(KernelPatcher &patcher, size_t index, mach_vm_address_t
 				patcher.clearError();
 			}
 			{
+				KernelPatcher::RouteRequest route("__ZN21AppleIntelFramebuffer28getInformationForDisplayModeEiP24IODisplayModeInformation", wrapTGLModeInfo, orgTGLModeInfo);
+				IORegistryEntry::getRegistryRoot()->setProperty("TGLRouteModeInfo", patcher.routeMultiple(index, &route, 1, address, size));
+				patcher.clearError();
+			}
+			{
 				KernelPatcher::RouteRequest routes[] {
 					{"__ZN21AppleIntelDisplayPath31configurePipePostCSCGamma_10BitEP19FlipTransactionArgs10IGColorCtl", wrapTGLGamma10, orgTGLGamma10},
 					{"__ZN31AppleIntelRegisterAccessManager15WriteRegister32Emj", wrapTGLRegisterWrite, orgTGLRegisterWrite}
@@ -18583,6 +18588,25 @@ uint32_t XE::wrapTGLPixelInfo(void *fb, int mode, int depth, int aperture, void 
 	char key[48]; snprintf(key, sizeof(key), "TGLPixelFB%uDepth%d", *reinterpret_cast<uint32_t *>(static_cast<uint8_t *>(fb) + 0x1DC), depth);
 	IORegistryEntry::getRegistryRoot()->setProperty(key, r, sizeof(r));
 	return result;
+}
+// Sequoia's getInformationForDisplayMode reads the scaler (+0x32C0) of the framebuffer's display pipe:
+// +0x49F0, or +0x4A08 once +0x3FD8 holds a pipe index. A framebuffer whose mode set failed has no pipe,
+// and WindowServer's first query then faulted at 0x32C0 (UHD 770 4680, HDMI-mode EDID at 297 MHz).
+// Report the mode as not ready instead; the caller already handles that result.
+uint32_t XE::wrapTGLModeInfo(void *fb, int mode, void *info) {
+	if (XELP::kernelOS(version) == XELP::OS::Sequoia && fb) {
+		auto b = static_cast<uint8_t *>(fb);
+		const auto index = *reinterpret_cast<int32_t *>(b + 0x3FD8);
+		auto pipe = *reinterpret_cast<uint8_t **>(b + (index == -1 ? 0x49F0 : 0x4A08));
+		if (!pipe || !*reinterpret_cast<void **>(pipe + 0x32C0)) {
+			static uint32_t hits;
+			uint64_t r[4] {++hits, *reinterpret_cast<uint32_t *>(b + 0x1DC), static_cast<uint64_t>(mode),
+				static_cast<uint64_t>(static_cast<uint32_t>(index))};
+			IORegistryEntry::getRegistryRoot()->setProperty("TGLModeInfoNoPipe", r, sizeof(r));
+			return kIOReturnNotReady;
+		}
+	}
+	return FunctionCast(wrapTGLModeInfo, callbackXE->orgTGLModeInfo)(fb, mode, info);
 }
 IOMemoryDescriptor *XE::wrapTGLAperture(void *fb, int aperture) {
 	auto r = FunctionCast(wrapTGLAperture, callbackXE->orgTGLAperture)(fb, aperture);
