@@ -12107,6 +12107,7 @@ bool XE::processKextFull(KernelPatcher &patcher, size_t index, mach_vm_address_t
 				patcher.clearError();
 			}
 			{
+				tglHDMIMaxClock = checkKernelArgument("-wex-hdmi-300mhz") ? 300000 : 0;
 				KernelPatcher::RouteRequest route("__ZN21AppleIntelFramebuffer22validateDetailedTimingEPvy", wrapTGLValidateTiming, orgTGLValidateTiming);
 				IORegistryEntry::getRegistryRoot()->setProperty("TGLRouteValidateTiming", patcher.routeMultiple(index, &route, 1, address, size));
 				patcher.clearError();
@@ -18633,7 +18634,7 @@ uint32_t XE::wrapTGLModeInfo(void *fb, int mode, void *info) {
 uint32_t XE::wrapTGLValidateTiming(void *fb, void *timing, uint64_t size) {
 	// Offsets as Sequoia's validateDetailedTiming reads them: pixel clock +0x54, h active/blanking
 	// +0x6C/+0x70, v active/blanking +0x7C/+0x80, pixel encoding +0xB4, bits per component +0xB6.
-	static const uint32_t hdmiMaxClock = checkKernelArgument("-wex-hdmi-300mhz") ? 300000 : 0;
+	const auto hdmiMaxClock = callbackXE->tglHDMIMaxClock;
 	uint32_t result = kIOReturnUnsupportedMode;
 	auto t = static_cast<const uint8_t *>(timing);
 	// +0x4289: getOnlineInfo's HDMI sink flag (TMDS port whose EDID carries an HDMI VSDB).
