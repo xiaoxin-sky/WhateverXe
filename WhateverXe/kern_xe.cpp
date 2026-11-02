@@ -18626,13 +18626,32 @@ uint32_t XE::wrapTGLModeInfo(void *fb, int mode, void *info) {
 // mode missing from the display list (4K60 YCbCr 4:2:0 over a 300 MHz HDMI port) can be traced to
 // its rejection. Keeps the latest 48 calls: {seq, fb, pixel clock kHz, h active, v active,
 // h blanking, v blanking, encoding | bpc << 16, result}. The timing is IODetailedTimingInformationV2.
+// With wexhdmimaxclk=<kHz>, an HDMI sink's timing whose TMDS clock exceeds the board's HDMI limit is
+// rejected here. The sink's EDID can then advertise its own higher TMDS limit, so 4K60 is listed and
+// only YCbCr 4:2:0 (half the TMDS clock) passes on a board wired for HDMI 1.4 (297 MHz).
 uint32_t XE::wrapTGLValidateTiming(void *fb, void *timing, uint64_t size) {
-	const auto result = FunctionCast(wrapTGLValidateTiming, callbackXE->orgTGLValidateTiming)(fb, timing, size);
 	// Offsets as Sequoia's validateDetailedTiming reads them: pixel clock +0x54, h active/blanking
 	// +0x6C/+0x70, v active/blanking +0x7C/+0x80, pixel encoding +0xB4, bits per component +0xB6.
+	static uint32_t hdmiMaxClock = UINT32_MAX;
+	if (hdmiMaxClock == UINT32_MAX && !PE_parse_boot_argn("wexhdmimaxclk", &hdmiMaxClock, sizeof(hdmiMaxClock)))
+		hdmiMaxClock = 0;
+	uint32_t result = kIOReturnUnsupportedMode;
+	auto t = static_cast<const uint8_t *>(timing);
+	// +0x4289: getOnlineInfo's HDMI sink flag (TMDS port whose EDID carries an HDMI VSDB).
+	if (hdmiMaxClock && fb && timing && size >= 0xB8 && static_cast<uint8_t *>(fb)[0x4289]) {
+		const uint64_t clock = *reinterpret_cast<const uint64_t *>(t + 0x54) / 1000;
+		const auto encoding = *reinterpret_cast<const uint16_t *>(t + 0xB4);
+		const auto bpc = *reinterpret_cast<const uint16_t *>(t + 0xB6);
+		// IOGraphics bit values: 10 bpc 0x4, 12 bpc 0x8, 16 bpc 0x10; YCbCr 4:2:2 0x4 (no deep colour
+		// TMDS overhead), 4:2:0 0x8. 8 bpc or unknown counts as 8.
+		uint64_t tmds = encoding == 0x4 ? clock : clock * (bpc == 0x10 ? 16 : bpc == 0x8 ? 12 : bpc == 0x4 ? 10 : 8) / 8;
+		if (encoding == 0x8) tmds /= 2;
+		if (tmds <= hdmiMaxClock) result = FunctionCast(wrapTGLValidateTiming, callbackXE->orgTGLValidateTiming)(fb, timing, size);
+	} else {
+		result = FunctionCast(wrapTGLValidateTiming, callbackXE->orgTGLValidateTiming)(fb, timing, size);
+	}
 	if (fb && timing && size >= 0xB8) {
 		static uint32_t ring[48][9], seq;
-		auto t = static_cast<const uint8_t *>(timing);
 		const auto n = __atomic_add_fetch(&seq, 1, __ATOMIC_RELAXED);
 		auto &r = ring[(n - 1) % 48];
 		r[0] = n;
