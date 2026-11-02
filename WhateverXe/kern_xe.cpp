@@ -12112,6 +12112,11 @@ bool XE::processKextFull(KernelPatcher &patcher, size_t index, mach_vm_address_t
 				IORegistryEntry::getRegistryRoot()->setProperty("TGLRouteValidateTiming", patcher.routeMultiple(index, &route, 1, address, size));
 				patcher.clearError();
 			}
+			if (tglHDMIMaxClock) {
+				KernelPatcher::RouteRequest route("__ZN21AppleIntelFramebuffer17updateTimingRangeEyy", wrapTGLTimingRange, orgTGLTimingRange);
+				IORegistryEntry::getRegistryRoot()->setProperty("TGLRouteTimingRange", patcher.routeMultiple(index, &route, 1, address, size));
+				patcher.clearError();
+			}
 			{
 				KernelPatcher::RouteRequest routes[] {
 					{"__ZN21AppleIntelDisplayPath31configurePipePostCSCGamma_10BitEP19FlipTransactionArgs10IGColorCtl", wrapTGLGamma10, orgTGLGamma10},
@@ -18667,6 +18672,20 @@ uint32_t XE::wrapTGLValidateTiming(void *fb, void *timing, uint64_t size) {
 		IORegistryEntry::getRegistryRoot()->setProperty("TGLValidateTimingCount", n, 32);
 	}
 	return result;
+}
+// getOnlineInfo caps every TMDS port's pixel clock (+0x4368) at a fixed 300 MHz and publishes it through
+// updateTimingRange, so WindowServer drops 4K60 (594 MHz) before validating any encoding. With
+// -wex-hdmi-300mhz the TMDS limit is enforced per encoding in wrapTGLValidateTiming instead; raise an
+// HDMI sink's pixel clock range to 600 MHz so 4K60 YCbCr 4:2:0 (297 MHz TMDS) can be offered.
+void XE::wrapTGLTimingRange(void *fb, uint64_t minClock, uint64_t maxClock) {
+	auto b = static_cast<uint8_t *>(fb);
+	if (fb && b[0x4289] && maxClock == 300000000) {
+		maxClock = 600000000;
+		*reinterpret_cast<uint64_t *>(b + 0x4368) = maxClock;
+		uint32_t r[] {*reinterpret_cast<uint32_t *>(b + 0x1DC), static_cast<uint32_t>(maxClock / 1000)};
+		IORegistryEntry::getRegistryRoot()->setProperty("TGLHDMITimingRange", r, sizeof(r));
+	}
+	FunctionCast(wrapTGLTimingRange, callbackXE->orgTGLTimingRange)(fb, minClock, maxClock);
 }
 IOMemoryDescriptor *XE::wrapTGLAperture(void *fb, int aperture) {
 	auto r = FunctionCast(wrapTGLAperture, callbackXE->orgTGLAperture)(fb, aperture);

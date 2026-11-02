@@ -347,7 +347,7 @@ private:
 	static void tglObserveEngine(void *power, uint32_t event, bool done, void *caller);
 	mach_vm_address_t orgTGLScanoutAllocate {}, orgTGLScanoutSetup {}, orgTGLPlaneUpdate {}, orgTGLAperture {};
 	mach_vm_address_t orgTGLPlaneSetup {}, orgTGLColorMode {}, orgTGLPixelInfo {}, orgTGLModeInfo {};
-	mach_vm_address_t orgTGLValidateTiming {};
+	mach_vm_address_t orgTGLValidateTiming {}, orgTGLTimingRange {};
 	uint32_t tglHDMIMaxClock {};
 	mach_vm_address_t orgTGLModeTiming {};
 	bool tglPanelDepthReady {false};
@@ -406,6 +406,7 @@ private:
 	static uint32_t wrapTGLPixelInfo(void *fb, int mode, int depth, int aperture, void *info);
 	static uint32_t wrapTGLModeInfo(void *fb, int mode, void *info);
 	static uint32_t wrapTGLValidateTiming(void *fb, void *timing, uint64_t size);
+	static void wrapTGLTimingRange(void *fb, uint64_t minClock, uint64_t maxClock);
 	static bool wrapTGLScanoutAllocate(void *fb);
 	static void wrapTGLScanoutSetup(void *fb);
 	static void wrapTGLPlaneUpdate(void *plane, bool flag);
