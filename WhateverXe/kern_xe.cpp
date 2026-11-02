@@ -12107,6 +12107,11 @@ bool XE::processKextFull(KernelPatcher &patcher, size_t index, mach_vm_address_t
 				patcher.clearError();
 			}
 			{
+				KernelPatcher::RouteRequest route("__ZN21AppleIntelFramebuffer22validateDetailedTimingEPvy", wrapTGLValidateTiming, orgTGLValidateTiming);
+				IORegistryEntry::getRegistryRoot()->setProperty("TGLRouteValidateTiming", patcher.routeMultiple(index, &route, 1, address, size));
+				patcher.clearError();
+			}
+			{
 				KernelPatcher::RouteRequest routes[] {
 					{"__ZN21AppleIntelDisplayPath31configurePipePostCSCGamma_10BitEP19FlipTransactionArgs10IGColorCtl", wrapTGLGamma10, orgTGLGamma10},
 					{"__ZN31AppleIntelRegisterAccessManager15WriteRegister32Emj", wrapTGLRegisterWrite, orgTGLRegisterWrite}
@@ -18616,6 +18621,33 @@ uint32_t XE::wrapTGLModeInfo(void *fb, int mode, void *info) {
 		}
 	}
 	return FunctionCast(wrapTGLModeInfo, callbackXE->orgTGLModeInfo)(fb, mode, info);
+}
+// Observe which detailed timings WindowServer asks the framebuffer to validate and the answer, so a
+// mode missing from the display list (4K60 YCbCr 4:2:0 over a 300 MHz HDMI port) can be traced to
+// its rejection. Keeps the latest 48 calls: {seq, fb, pixel clock kHz, h active, v active,
+// h blanking, v blanking, encoding | bpc << 16, result}. The timing is IODetailedTimingInformationV2.
+uint32_t XE::wrapTGLValidateTiming(void *fb, void *timing, uint64_t size) {
+	const auto result = FunctionCast(wrapTGLValidateTiming, callbackXE->orgTGLValidateTiming)(fb, timing, size);
+	// Offsets as Sequoia's validateDetailedTiming reads them: pixel clock +0x54, h active/blanking
+	// +0x6C/+0x70, v active/blanking +0x7C/+0x80, pixel encoding +0xB4, bits per component +0xB6.
+	if (fb && timing && size >= 0xB8) {
+		static uint32_t ring[48][9], seq;
+		auto t = static_cast<const uint8_t *>(timing);
+		const auto n = __atomic_add_fetch(&seq, 1, __ATOMIC_RELAXED);
+		auto &r = ring[(n - 1) % 48];
+		r[0] = n;
+		r[1] = *reinterpret_cast<uint32_t *>(static_cast<uint8_t *>(fb) + 0x1DC);
+		r[2] = static_cast<uint32_t>(*reinterpret_cast<const uint64_t *>(t + 0x54) / 1000);
+		r[3] = *reinterpret_cast<const uint32_t *>(t + 0x6C);
+		r[4] = *reinterpret_cast<const uint32_t *>(t + 0x7C);
+		r[5] = *reinterpret_cast<const uint32_t *>(t + 0x70);
+		r[6] = *reinterpret_cast<const uint32_t *>(t + 0x80);
+		r[7] = *reinterpret_cast<const uint16_t *>(t + 0xB4) | static_cast<uint32_t>(*reinterpret_cast<const uint16_t *>(t + 0xB6)) << 16;
+		r[8] = result;
+		IORegistryEntry::getRegistryRoot()->setProperty("TGLValidateTimings", ring, sizeof(ring));
+		IORegistryEntry::getRegistryRoot()->setProperty("TGLValidateTimingCount", n, 32);
+	}
+	return result;
 }
 IOMemoryDescriptor *XE::wrapTGLAperture(void *fb, int aperture) {
 	auto r = FunctionCast(wrapTGLAperture, callbackXE->orgTGLAperture)(fb, aperture);
