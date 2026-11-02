@@ -11522,6 +11522,15 @@ bool XE::wrapFramebufferInit(IOService *fb,IOService *controller,uint32_t index)
  if(!callbackXE->framebufferDonorCommonReady || !fb || !controller || index>=3 ||
     fb->getMetaClass()->getClassSize()<0x4B90 || controller->getMetaClass()->getClassSize()<0x1C20)return false;
  if(!FunctionCast(wrapFramebufferInit,callbackXE->orgFramebufferInit)(fb,controller,index))return false;
+ // AAPL0%u,override-* on the GPU replace EDID block 0 only; fbGetDDCBlock still reads extension
+ // blocks from the sink. checkForEDIDOverride serves every block from the framebuffer's own
+ // AAPL,override-has-edid-digital, so publish a multi-block GPU override there as well.
+ if(auto gpu=controller->getProvider()) {
+  char key[40];snprintf(key,sizeof(key),"AAPL0%u,override-no-connect",index);
+  auto edid=OSDynamicCast(OSData,gpu->getProperty(key));
+  if(edid && edid->getLength()>128 && !(edid->getLength()%128) && !fb->getProperty("AAPL,override-has-edid-digital"))
+   fb->setProperty("AAPL,override-has-edid-digital",edid);
+ }
  struct Objects {size_t size(void *p) const {return p ? static_cast<OSObject *>(p)->getMetaClass()->getClassSize() : 0;}} objects;
  const bool bound=FramebufferDonor::bindManagers(objects,fb,controller,index);
  fb->setProperty("WEXFramebufferManagersBound",bound);
