@@ -411,6 +411,7 @@ private:
 	static uint32_t wrapTGLModeInfo(void *fb, int mode, void *info);
 	static uint32_t wrapTGLValidateTiming(void *fb, void *timing, uint64_t size);
 	static void wrapTGLTimingRange(void *fb, uint64_t minClock, uint64_t maxClock);
+	void routeTGLDisplayModes(KernelPatcher &patcher, size_t index, mach_vm_address_t address, size_t size);
 	static uint32_t wrapTGLHwSetMode(void *controller, void *fb, void *path, const void *timing);
 	static uint64_t wrapTGLPllDivisors(void *controller, uint32_t clock, void *path);
 	static void wrapTGLFillAVI(void *controller, void *fb, uint8_t *frame);

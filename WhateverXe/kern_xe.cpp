@@ -12101,27 +12101,7 @@ bool XE::processKextFull(KernelPatcher &patcher, size_t index, mach_vm_address_t
 				IORegistryEntry::getRegistryRoot()->setProperty("TGLWEGRouteScanoutPower", routed);
 				patcher.clearError();
 			}
-			{
-				KernelPatcher::RouteRequest route("__ZN21AppleIntelFramebuffer28getInformationForDisplayModeEiP24IODisplayModeInformation", wrapTGLModeInfo, orgTGLModeInfo);
-				IORegistryEntry::getRegistryRoot()->setProperty("TGLRouteModeInfo", patcher.routeMultiple(index, &route, 1, address, size));
-				patcher.clearError();
-			}
-			{
-				tglHDMIMaxClock = checkKernelArgument("-wex-hdmi-300mhz") ? 300000 : 0;
-				KernelPatcher::RouteRequest route("__ZN21AppleIntelFramebuffer22validateDetailedTimingEPvy", wrapTGLValidateTiming, orgTGLValidateTiming);
-				IORegistryEntry::getRegistryRoot()->setProperty("TGLRouteValidateTiming", patcher.routeMultiple(index, &route, 1, address, size));
-				patcher.clearError();
-			}
-			if (tglHDMIMaxClock) {
-				KernelPatcher::RouteRequest routes[] {
-					{"__ZN21AppleIntelFramebuffer17updateTimingRangeEyy", wrapTGLTimingRange, orgTGLTimingRange},
-					{"__ZN31AppleIntelFramebufferController9hwSetModeEP21AppleIntelFramebufferP21AppleIntelDisplayPathPK29IODetailedTimingInformationV2", wrapTGLHwSetMode, orgTGLHwSetMode},
-					{"__ZN31AppleIntelFramebufferController20calculatePllDivisorsEjP21AppleIntelDisplayPath", wrapTGLPllDivisors, orgTGLPllDivisors},
-					{"__ZN31AppleIntelFramebufferController10fillAVIDIPEP21AppleIntelFramebufferPh", wrapTGLFillAVI, orgTGLFillAVI},
-				};
-				IORegistryEntry::getRegistryRoot()->setProperty("TGLRouteTimingRange", patcher.routeMultiple(index, routes, arrsize(routes), address, size));
-				patcher.clearError();
-			}
+			routeTGLDisplayModes(patcher, index, address, size);
 			{
 				KernelPatcher::RouteRequest routes[] {
 					{"__ZN21AppleIntelDisplayPath31configurePipePostCSCGamma_10BitEP19FlipTransactionArgs10IGColorCtl", wrapTGLGamma10, orgTGLGamma10},
@@ -18632,6 +18612,30 @@ uint32_t XE::wrapTGLModeInfo(void *fb, int mode, void *info) {
 		}
 	}
 	return FunctionCast(wrapTGLModeInfo, callbackXE->orgTGLModeInfo)(fb, mode, info);
+}
+// Display mode routes, outside processKextFull to keep its kernel stack frame within budget.
+__attribute__((noinline)) void XE::routeTGLDisplayModes(KernelPatcher &patcher, size_t index, mach_vm_address_t address, size_t size) {
+	{
+		KernelPatcher::RouteRequest route("__ZN21AppleIntelFramebuffer28getInformationForDisplayModeEiP24IODisplayModeInformation", wrapTGLModeInfo, orgTGLModeInfo);
+		IORegistryEntry::getRegistryRoot()->setProperty("TGLRouteModeInfo", patcher.routeMultiple(index, &route, 1, address, size));
+		patcher.clearError();
+	}
+	{
+		tglHDMIMaxClock = checkKernelArgument("-wex-hdmi-300mhz") ? 300000 : 0;
+		KernelPatcher::RouteRequest route("__ZN21AppleIntelFramebuffer22validateDetailedTimingEPvy", wrapTGLValidateTiming, orgTGLValidateTiming);
+		IORegistryEntry::getRegistryRoot()->setProperty("TGLRouteValidateTiming", patcher.routeMultiple(index, &route, 1, address, size));
+		patcher.clearError();
+	}
+	if (tglHDMIMaxClock) {
+		KernelPatcher::RouteRequest routes[] {
+			{"__ZN21AppleIntelFramebuffer17updateTimingRangeEyy", wrapTGLTimingRange, orgTGLTimingRange},
+			{"__ZN31AppleIntelFramebufferController9hwSetModeEP21AppleIntelFramebufferP21AppleIntelDisplayPathPK29IODetailedTimingInformationV2", wrapTGLHwSetMode, orgTGLHwSetMode},
+			{"__ZN31AppleIntelFramebufferController20calculatePllDivisorsEjP21AppleIntelDisplayPath", wrapTGLPllDivisors, orgTGLPllDivisors},
+			{"__ZN31AppleIntelFramebufferController10fillAVIDIPEP21AppleIntelFramebufferPh", wrapTGLFillAVI, orgTGLFillAVI},
+		};
+		IORegistryEntry::getRegistryRoot()->setProperty("TGLRouteHDMI420", patcher.routeMultiple(index, routes, arrsize(routes), address, size));
+		patcher.clearError();
+	}
 }
 // Observe which detailed timings WindowServer asks the framebuffer to validate and the answer, so a
 // mode missing from the display list (4K60 YCbCr 4:2:0 over a 300 MHz HDMI port) can be traced to
