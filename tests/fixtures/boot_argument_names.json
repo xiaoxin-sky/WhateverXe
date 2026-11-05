@@ -139,5 +139,6 @@
   "-wex-adlp-readout": [],
   "-wex-adlp-load-only": [],
   "-wex-display13-offline": [],
-  "-wex-hdmi-300mhz": []
+  "-wex-hdmi-300mhz": [],
+  "-wex-no-posh-free": []
 }

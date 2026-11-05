@@ -44,6 +44,7 @@ struct KernelPatcher {
  void clearError(){}
 };
 namespace XeDataAccess {bool processKext(KernelPatcher&,size_t,mach_vm_address_t,size_t){return false;}void processKernel(KernelPatcher &){assert(published);events.push_back(7);}}
+namespace TGLMetalPosh {void processKernel(KernelPatcher &){assert(published);}}
 struct Graphics {size_t loadIndex=4;bool off=false;void switchOff(){off=true;}} graphics;
 struct {size_t loadIndex=5;}backlight;
 struct XeHost {

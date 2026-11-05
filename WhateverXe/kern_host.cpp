@@ -3,6 +3,7 @@
 #include "kern_xelp_device.hpp"
 #include "kern_xe_data_access.hpp"
 #include "kern_backlight_profile.hpp"
+#include "kern_tgl_metal_posh.hpp"
 #include <Headers/kern_api.hpp>
 #include <Headers/kern_iokit.hpp>
 #include <IOKit/pci/IOPCIDevice.h>
@@ -51,6 +52,7 @@ void XeHost::processKernel(KernelPatcher &patcher) {
                 profile.family==XELP::Family::AlderLakeP))xe.processKernel(patcher,info);
  if(active) {
   XeDataAccess::processKernel(patcher);
+  TGLMetalPosh::processKernel(patcher);
   // Xe admission reads physical PCI identity. Do not install WEG's ID spoof hooks.
   // WEG normalizes the ME device discovered by Lilu for Apple's name matching.
   if(auto mei=info->managementEngine) {
