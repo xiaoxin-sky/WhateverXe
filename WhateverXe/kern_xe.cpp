@@ -11380,8 +11380,14 @@ bool XE::processTGLAccelerator(KernelPatcher &patcher, size_t index, mach_vm_add
 			// The same donor caller also stalls the accelerator resource lock on
 			// this Tahoe kernel. Keep the OS-family and exact donor guards: only the
 			// recovery caller changes; native reset/replay still owns completion.
+			// Sequoia loads the same donor (BA3AA1C0) and hangs the same way: the
+			// event machine sits in eventTimeout -> IGScheduler5::checkForProgress
+			// while WindowServer waits in Metal until its watchdog fires. The
+			// callback touches only donor objects, and the byte guards below still
+			// qualify the binary.
 			const bool recoveryRequested=checkKernelArgument("-disablegfxfirmware") &&
 				((XELP::kernelOS(version)==XELP::OS::BigSur) ||
+				 (XELP::kernelOS(version)==XELP::OS::Sequoia) ||
 				 (XELP::kernelOS(version)==XELP::OS::Tahoe));
 			bool recoveryOK=!recoveryRequested;
 			if (recoveryRequested) {
