@@ -69,6 +69,8 @@
 #include "kern_tgl_submit_history.hpp"
 #include "kern_tgl_hang_select.hpp"
 #include "kern_tgl_recovery.hpp"
+#include "kern_tgl_same_engine_wait.hpp"
+#include "kern_tgl_event_timeout.hpp"
 #include "kern_tgl_aux_call.hpp"
 
 #include <Headers/kern_api.hpp>
@@ -297,9 +299,167 @@ bool tglRecoverySerialize(void *,void *,OSSerialize *serializer) {
 	auto out=OSData::withBytes(data,sizeof(data));if (!out) return false;
 	const bool ok=out->serialize(serializer);out->release();return ok;
 }
+
+// Armed only by a single-pass recovery; until==0 keeps native waits all boot.
+// The wrapper adds no lock, wait, stamp or completion. It either calls the
+// native emitter or leaves out one same-engine dependency poll.
+uintptr_t tglOrigMainWait {};
+uintptr_t tglOrigBlitWait {};
+bool tglSameEngineReady {};
+uint64_t tglSameEngineWindow {}, tglSameEngineUntil {};
+uint32_t tglSameEngineArms {}, tglSameEngineSkips {}, tglSameEngineBlitSkips {};
+void tglMainWaitForSemaphore(void *ring,uint32_t stamp,uint32_t index) {
+	const auto until=__atomic_load_n(&tglSameEngineUntil,__ATOMIC_ACQUIRE);
+	if (until) {
+		auto r=static_cast<uint8_t *>(ring);
+		auto owner=*reinterpret_cast<uint8_t **>(r+0x10);
+		uint64_t flags {},now {};memcpy(&flags,owner+0x1190,sizeof(flags));clock_get_uptime(&now);
+		if (TGLSameEngineWait::skip(now,until,flags,index,r[0x40])) {
+			__atomic_fetch_add(&tglSameEngineSkips,1,__ATOMIC_RELAXED);
+			return;
+		}
+	}
+	FunctionCast(tglMainWaitForSemaphore,tglOrigMainWait)(ring,stamp,index);
+}
+void tglBlitWaitForSemaphore(void *ring,uint32_t stamp,uint32_t index) {
+	const auto until=__atomic_load_n(&tglSameEngineUntil,__ATOMIC_ACQUIRE);
+	if (until) {
+		auto r=static_cast<uint8_t *>(ring);
+		auto owner=*reinterpret_cast<uint8_t **>(r+0x10);
+		uint64_t flags {},now {};memcpy(&flags,owner+0x1190,sizeof(flags));clock_get_uptime(&now);
+		if (TGLSameEngineWait::skip(now,until,flags,index,r[0x40])) {
+			__atomic_fetch_add(&tglSameEngineSkips,1,__ATOMIC_RELAXED);
+			__atomic_fetch_add(&tglSameEngineBlitSkips,1,__ATOMIC_RELAXED);
+			return;
+		}
+	}
+	FunctionCast(tglBlitWaitForSemaphore,tglOrigBlitWait)(ring,stamp,index);
+}
+void tglArmSameEngineWindow() {
+	if (!tglSameEngineReady) return;
+	uint64_t now {};clock_get_uptime(&now);
+	__atomic_store_n(&tglSameEngineUntil,TGLSameEngineWait::armUntil(now,tglSameEngineWindow),__ATOMIC_RELEASE);
+	__atomic_fetch_add(&tglSameEngineArms,1,__ATOMIC_RELAXED);
+}
+bool tglSameEngineSerialize(void *,void *,OSSerialize *serializer) {
+	uint64_t q[7] {1,tglSameEngineWindow,__atomic_load_n(&tglSameEngineUntil,__ATOMIC_ACQUIRE),
+		__atomic_load_n(&tglSameEngineArms,__ATOMIC_RELAXED),__atomic_load_n(&tglSameEngineSkips,__ATOMIC_RELAXED),
+		0,__atomic_load_n(&tglSameEngineBlitSkips,__ATOMIC_RELAXED)};
+	clock_get_uptime(&q[5]);
+	auto data=OSData::withBytes(q,sizeof(q));if (!data) return false;
+	const bool ok=data->serialize(serializer);data->release();return ok;
+}
+
+uintptr_t tglOrigEventTimeout {};
+uintptr_t tglHaltStreamer {};
+uintptr_t tglResumeStreamer {};
+uint64_t tglEventTimeoutMinWait {};
+uint64_t tglEventTimeoutRepeatWindow {};
+TGLEventTimeout::State tglEventTimeoutState {};
+void *tglEventTimeout(void *em,int32_t stampIdx) {
+	++tglEventTimeoutState.calls;
+	tglEventTimeoutState.lastStampIdx=static_cast<uint32_t>(stampIdx);
+	tglEventTimeoutState.lastAction=static_cast<uint32_t>(TGLEventTimeout::Action::None);
+	uint64_t before {},after {};
+	clock_get_uptime(&before);
+	void *channel=FunctionCast(tglEventTimeout,tglOrigEventTimeout)(em,stampIdx);
+	clock_get_uptime(&after);
+	const uint64_t duration=after>=before ? (after-before) : 0;
+	tglEventTimeoutState.lastDurationNs=duration;
+	auto *emBytes=static_cast<uint8_t *>(em);
+	auto *accel=*reinterpret_cast<uint8_t **>(emBytes+0x10);
+	uint64_t flags {};int32_t displayMin {},displayMax {};
+	memcpy(&flags,accel+0x1190,sizeof(flags));
+	memcpy(&displayMin,accel+0x11A0,sizeof(displayMin));
+	memcpy(&displayMax,accel+0x11A4,sizeof(displayMax));
+	uint8_t engine=0xFF;
+	const bool hasEngine=TGLEventTimeout::engineForStamp(flags,stampIdx,engine);
+	tglEventTimeoutState.lastEngine=engine;
+	if (channel) {
+		if (hasEngine) TGLEventTimeout::noteNonNull(tglEventTimeoutState,engine);
+		return channel;
+	}
+	const uint32_t streak=hasEngine ?
+		TGLEventTimeout::noteNull(tglEventTimeoutState,engine,after,tglEventTimeoutRepeatWindow) : 0;
+	if (!hasEngine || !TGLEventTimeout::shouldProbeFallback(
+			flags,stampIdx,displayMin,displayMax,duration,tglEventTimeoutMinWait))
+		return nullptr;
+	void *scheduler=*reinterpret_cast<void **>(accel+0x1250);
+	if (!scheduler) return nullptr;
+	auto *vtab=*reinterpret_cast<uintptr_t **>(scheduler);
+	using VoidFn=void (*)(void *);
+	using EngineFn=void (*)(void *,uint32_t);
+	using GetActiveFn=void (*)(void *,uint32_t,void **,uint64_t *,void **);
+	auto pauseFn=reinterpret_cast<VoidFn>(vtab[0x178/8]);
+	auto resumeFn=reinterpret_cast<VoidFn>(vtab[0x180/8]);
+	auto prepareResetFn=reinterpret_cast<EngineFn>(vtab[0x188/8]);
+	auto getActiveFn=reinterpret_cast<GetActiveFn>(vtab[0x198/8]);
+	auto haltFn=FunctionCast(static_cast<EngineFn>(nullptr),tglHaltStreamer);
+	auto resumeCsFn=FunctionCast(static_cast<EngineFn>(nullptr),tglResumeStreamer);
+
+	pauseFn(scheduler);
+	haltFn(scheduler,engine);
+	void *ctx0=nullptr,*ctx1=nullptr;uint64_t elapsedNs=0;
+	getActiveFn(scheduler,engine,&ctx0,&elapsedNs,&ctx1);
+	void *ctxChannel=ctx0 ? *reinterpret_cast<void **>(static_cast<uint8_t *>(ctx0)+0xB8) : nullptr;
+	tglEventTimeoutState.lastElapsedNs=elapsedNs;
+	tglEventTimeoutState.lastChannelStamp=ctxChannel ?
+		*reinterpret_cast<uint32_t *>(static_cast<uint8_t *>(ctxChannel)+0x20) : 0xFFFFFFFFU;
+	if (TGLEventTimeout::canFallbackRepeated(streak,ctx0,ctxChannel)) {
+		++tglEventTimeoutState.fallbackRepeated;
+		tglEventTimeoutState.lastAction=static_cast<uint32_t>(TGLEventTimeout::Action::FallbackRepeated);
+		tglEventTimeoutState.consecutiveNulls[engine]=0;
+		tglEventTimeoutState.lastNullAt[engine]=0;
+		prepareResetFn(scheduler,engine);
+		return ctxChannel;
+	}
+	resumeCsFn(scheduler,engine);
+
+	if (engine==TGLEventTimeout::rcsEngine && !ctx0 && !ctx1) {
+		haltFn(scheduler,TGLEventTimeout::bcsEngine);
+		void *bcsCtx0=nullptr,*bcsCtx1=nullptr;uint64_t bcsElapsedNs=0;
+		getActiveFn(scheduler,TGLEventTimeout::bcsEngine,&bcsCtx0,&bcsElapsedNs,&bcsCtx1);
+		void *bcsChannel=bcsCtx0 ? *reinterpret_cast<void **>(static_cast<uint8_t *>(bcsCtx0)+0xB8) : nullptr;
+		tglEventTimeoutState.lastElapsedNs=bcsElapsedNs;
+		tglEventTimeoutState.lastChannelStamp=bcsChannel ?
+			*reinterpret_cast<uint32_t *>(static_cast<uint8_t *>(bcsChannel)+0x20) : 0xFFFFFFFFU;
+		if (TGLEventTimeout::canFallbackBCS(engine,ctx0,ctx1,bcsCtx0,bcsChannel)) {
+			++tglEventTimeoutState.fallbackBCS;
+			tglEventTimeoutState.lastAction=static_cast<uint32_t>(TGLEventTimeout::Action::FallbackBCS);
+			tglEventTimeoutState.consecutiveNulls[engine]=0;
+			tglEventTimeoutState.lastNullAt[engine]=0;
+			prepareResetFn(scheduler,TGLEventTimeout::bcsEngine);
+			return bcsChannel;
+		}
+		resumeCsFn(scheduler,TGLEventTimeout::bcsEngine);
+	}
+	resumeFn(scheduler);
+	return nullptr;
+}
+bool tglEventTimeoutSerialize(void *,void *,OSSerialize *serializer) {
+	uint64_t q[11] {
+		1,
+		tglEventTimeoutState.calls,
+		tglEventTimeoutState.nativeNonNull,
+		tglEventTimeoutState.nativeNull,
+		tglEventTimeoutState.fallbackBCS,
+		tglEventTimeoutState.fallbackRepeated,
+		tglEventTimeoutState.lastDurationNs,
+		tglEventTimeoutState.lastElapsedNs,
+		(static_cast<uint64_t>(tglEventTimeoutState.lastEngine)<<32) | tglEventTimeoutState.lastStampIdx,
+		(static_cast<uint64_t>(tglEventTimeoutState.lastAction)<<32) | tglEventTimeoutState.lastChannelStamp,
+		0
+	};
+	clock_get_uptime(&q[10]);
+	auto data=OSData::withBytes(q,sizeof(q));if (!data) return false;
+	const bool ok=data->serialize(serializer);data->release();return ok;
+}
 }
 
 void XE::wrapTGLRecovery(void *channel) {
+	// Arm before resume: the first frames submitted after it are the ones that
+	// would wait on the same engine again.
+	tglArmSameEngineWindow();
 	const auto n=__atomic_fetch_add(&tglRecoveryCalls,1,__ATOMIC_RELAXED);
 	uint64_t before {};clock_get_uptime(&before);
 	const auto result=TGLRecovery::resetAndResume(channel);
@@ -11414,6 +11574,78 @@ bool XE::processTGLAccelerator(KernelPatcher &patcher, size_t index, mach_vm_add
 			}
 			IORegistryEntry::getRegistryRoot()->setProperty("TGLRecoverySinglePassRequested",recoveryRequested);
 			IORegistryEntry::getRegistryRoot()->setProperty("TGLRecoverySinglePassReady",recoveryRequested && recoveryOK);
+			// After a restart aborts a WindowServer frame, its next frames poll on
+			// the render engine for a same-engine channel queued behind them, and
+			// each poll is the next hang. Only a recovery arms the bounded window;
+			// it is optional and never part of accelerator admission.
+			bool sameEngineOK=false;
+			bool sameEngineBlitOK=false;
+			if (recoveryRequested && recoveryOK && !checkKernelArgument("-wex-strict-gpu-wait")) {
+				const char *mainWait="__ZN24IGHardwareRingBufferMain16waitForSemaphoreEjj";
+				const char *blitWait="__ZN24IGHardwareRingBufferBlit16waitForSemaphoreEjj";
+				sameEngineOK=size>TGLSameEngineWait::tableOffset+TGLSameEngineWait::tableSize &&
+					patcher.solveSymbol<mach_vm_address_t>(index,mainWait,address,size)==address+TGLSameEngineWait::waitOffset &&
+					patcher.solveSymbol<mach_vm_address_t>(index,"__ZN20IGHardwareRingBuffer23canUseSemaphoreWaitPollEi",address,size)==address+TGLSameEngineWait::canUseOffset &&
+					TGLSameEngineWait::qualified(reinterpret_cast<const uint8_t *>(address));
+				patcher.clearError();
+				const bool blitQualified=sameEngineOK &&
+					patcher.solveSymbol<mach_vm_address_t>(index,blitWait,address,size)==address+TGLSameEngineWait::blitWaitOffset &&
+					TGLSameEngineWait::qualifiedBlit(reinterpret_cast<const uint8_t *>(address));
+				patcher.clearError();
+				if (sameEngineOK) {
+					nanoseconds_to_absolutetime(TGLSameEngineWait::windowNs,&tglSameEngineWindow);
+					KernelPatcher::RouteRequest hook[] {{mainWait,tglMainWaitForSemaphore,tglOrigMainWait}};
+					sameEngineOK=patcher.routeMultiple(index,hook,arrsize(hook),address,size);
+				}
+				patcher.clearError();
+				if (sameEngineOK && blitQualified) {
+					KernelPatcher::RouteRequest blitHook[] {{blitWait,tglBlitWaitForSemaphore,tglOrigBlitWait}};
+					sameEngineBlitOK=patcher.routeMultiple(index,blitHook,arrsize(blitHook),address,size);
+				}
+				patcher.clearError();
+				if (sameEngineOK) if (auto live=OSSerializer::forTarget(nullptr,tglSameEngineSerialize)) {
+					IORegistryEntry::getRegistryRoot()->setProperty("TGLSameEngineWaitLive",live);live->release();
+				}
+			}
+			tglSameEngineReady=sameEngineOK;
+			IORegistryEntry::getRegistryRoot()->setProperty("TGLSameEngineWaitRelaxReady",sameEngineOK);
+			IORegistryEntry::getRegistryRoot()->setProperty("TGLSameEngineBlitWaitRelaxReady",sameEngineBlitOK);
+
+			// Fallback when IGAccelEventMachine::eventTimeout returns nullptr after a
+			// full checkForProgress stall (Reason 4: RCS idle while BCS hung; Reason 5:
+			// repeated nulls on the same engine), preventing GPURestartSkipped/Deferred
+			// permanent display freezes. Optional and never part of accelerator admission.
+			bool eventTimeoutFallbackOK=false;
+			if (recoveryRequested && recoveryOK && !checkKernelArgument("-wex-no-timeout-fallback")) {
+				const char *timeoutSym="__ZN19IGAccelEventMachine12eventTimeoutEi";
+				const char *haltSym="__ZN11IGScheduler19haltCommandStreamerE10IGHwCsType";
+				const char *resumeSym="__ZN11IGScheduler21resumeCommandStreamerE10IGHwCsType";
+				const char *getActiveSym="__ZN12IGScheduler517getActiveContextsE10IGHwCsTypePP17IGHardwareContextPyS3_";
+				const char *prepareSym="__ZN12IGScheduler515prepareGPUResetE10IGHwCsType";
+				const auto haltAddr=patcher.solveSymbol<mach_vm_address_t>(index,haltSym,address,size);
+				const auto resumeAddr=patcher.solveSymbol<mach_vm_address_t>(index,resumeSym,address,size);
+				eventTimeoutFallbackOK=size>TGLEventTimeout::lutOffset+TGLSameEngineWait::tableSize &&
+					patcher.solveSymbol<mach_vm_address_t>(index,timeoutSym,address,size)==address+TGLEventTimeout::eventTimeoutOffset &&
+					haltAddr==address+TGLEventTimeout::haltOffset &&
+					resumeAddr==address+TGLEventTimeout::resumeOffset &&
+					patcher.solveSymbol<mach_vm_address_t>(index,getActiveSym,address,size)==address+TGLEventTimeout::getActiveOffset &&
+					patcher.solveSymbol<mach_vm_address_t>(index,prepareSym,address,size)==address+TGLEventTimeout::prepareResetOffset &&
+					TGLEventTimeout::qualified(reinterpret_cast<const uint8_t *>(address));
+				patcher.clearError();
+				if (eventTimeoutFallbackOK) {
+					tglHaltStreamer=haltAddr;
+					tglResumeStreamer=resumeAddr;
+					nanoseconds_to_absolutetime(TGLEventTimeout::minProgressWaitNs,&tglEventTimeoutMinWait);
+					nanoseconds_to_absolutetime(TGLEventTimeout::repeatWindowNs,&tglEventTimeoutRepeatWindow);
+					KernelPatcher::RouteRequest hook[] {{timeoutSym,tglEventTimeout,tglOrigEventTimeout}};
+					eventTimeoutFallbackOK=patcher.routeMultiple(index,hook,arrsize(hook),address,size);
+				}
+				patcher.clearError();
+				if (eventTimeoutFallbackOK) if (auto live=OSSerializer::forTarget(nullptr,tglEventTimeoutSerialize)) {
+					IORegistryEntry::getRegistryRoot()->setProperty("TGLEventTimeoutLive",live);live->release();
+				}
+			}
+			IORegistryEntry::getRegistryRoot()->setProperty("TGLEventTimeoutFallbackReady",eventTimeoutFallbackOK);
 			tglAcceleratorReady = surfaceABIReady && adlnObserved && skuReady && urbReady && ccsReady && hizReady && ccsPSReady && ggttOK && observed && ok && gucOK && dmaWriteOK && hostOK && scratchOK && blitInitOK && tglMMIOUCReady && copyOK && auxAlignOK && iosCCSOK && ffModeOK && cpsOK && flushOK && tlbPreparserOK && semaphoreTLBOK && hangOK && recoveryOK && completionCacheOK && contextCacheOK;
 			// r201: resource/copy diagnostics are absent, not admission requirements.
 			IORegistryEntry::getRegistryRoot()->setProperty("TGLResourceDiagnosticsRemoved",true);

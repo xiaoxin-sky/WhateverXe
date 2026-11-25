@@ -140,5 +140,7 @@
   "-wex-adlp-load-only": [],
   "-wex-display13-offline": [],
   "-wex-hdmi-300mhz": [],
-  "-wex-no-posh-free": []
+  "-wex-no-posh-free": [],
+  "-wex-strict-gpu-wait": [],
+  "-wex-no-timeout-fallback": []
 }

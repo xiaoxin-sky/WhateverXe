@@ -202,6 +202,12 @@ continuously. The fix changes the driver's code in memory after macOS has
 validated its signature; the installed file and its signature are unchanged.
 The optional `-wex-no-posh-free` argument keeps the driver's original behavior.
 
+For 60 seconds after WEX recovers from a GPU hang on Big Sur, Sequoia or Tahoe,
+the GPU no longer waits for other work queued on the same engine. Otherwise the
+first hang can repeat on every following frame and freeze the screen. During
+that minute, a window can briefly show an unfinished frame. The optional
+`-wex-strict-gpu-wait` argument keeps the driver's original waits.
+
 Temporary development diagnostic: `-wex-adlp-readout` captures ADL-P boot resources while keeping GPU driver admission disabled. It is not required for supported hardware.
 `-wex-adlp-load-only` blocks both native framebuffer and accelerator probes/starts on a selected ADL-P/RPL-P device, for load-only diagnostics without GPU initialization.
 `-wex-display13-offline` keeps native display controller initialization enabled on Alder Lake-N / Twin Lake and Alder Lake-H/P/U / Raptor Lake-H/P/U but reports selected outputs as disconnected, isolating HPD/EDID and mode programming for framebuffer diagnostics. It does not establish display operation.
